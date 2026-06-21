@@ -17,15 +17,14 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
-# --- БАЗА ДАННЫХ (Переделана под нормальную структуру) ---
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
-    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            role TEXT,          -- 'trainer' или 'friend'
+            role TEXT,          
             name TEXT,
             time_hours INTEGER,
             time_minutes INTEGER,
@@ -34,14 +33,12 @@ def init_db():
             last_workout_done INTEGER DEFAULT 1
         )
     """)
-    # Таблица глобальных настроек (чтобы хранить план тренировок)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY DEFAULT 1,
             workout_plan TEXT DEFAULT 'План пока не составлен. Жди указаний тренера!'
         )
     """)
-    # Таблица лимитов сообщений
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS friend_notes_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +50,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Получить данные конкретного юзера
 def get_user(user_id):
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
@@ -64,7 +60,6 @@ def get_user(user_id):
         return {"role": row[0], "name": row[1], "time_hours": row[2], "time_minutes": row[3], "streak_days": row[4], "missed_days": row[5], "last_workout_done": row[6]}
     return None
 
-# Получить ID тренера и друга (для рассылок)
 def get_roles_ids():
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
@@ -132,26 +127,29 @@ def get_workout_keyboard():
     builder.button(text="Выполнено! ✅", callback_data="workout_done")
     return builder.as_markup()
 
-# Ежедневное напоминание (вызывается планировщиком)
+# Функция отправки напоминания
 async def send_reminder(chat_id):
     user_data = get_user(chat_id)
     ids = get_roles_ids()
     plan = get_workout_plan()
     
-    if user_data and user_data["role"] == "friend":
+    # Берем имя из базы, если юзера нет — ставим заглушку (для тестов)
+    name = user_data["name"] if user_data else "Друг"
+    
+    if user_data:
         if user_data["last_workout_done"] == 0:
             new_missed = user_data["missed_days"] + 1
             update_user(chat_id, "missed_days", new_missed)
             update_user(chat_id, "streak_days", 0)
-            if ids["trainer_id"]:
-                await bot.send_message(ids["trainer_id"], f"⚠️ Пропуск! {user_data['name']} не нажал кнопку за прошлую тренировку.")
+            if ids["trainer_id"] and ids["trainer_id"] != chat_id:
+                await bot.send_message(ids["trainer_id"], f"⚠️ Пропуск! {name} не нажал кнопку за прошлую тренировку.")
 
-        update_user(chat_id, "last_workout_done", 0)
-        await bot.send_message(
-            chat_id, 
-            f"Привет, {user_data['name']}! Время тренировки! 💪\n\n**Твой план:**\n{plan}\n\nВыполнишь — жми кнопку!",
-            reply_markup=get_workout_keyboard()
-        )
+    update_user(chat_id, "last_workout_done", 0)
+    await bot.send_message(
+        chat_id, 
+        f"Привет, {name}! Время тренировки! 💪\n\n**Твой План:**\n{plan}\n\nВыполнишь — жми кнопку!",
+        reply_markup=get_workout_keyboard()
+    )
 
 @dp.callback_query(F.data == "workout_done")
 async def workout_done_callback(callback: types.CallbackQuery):
@@ -159,21 +157,20 @@ async def workout_done_callback(callback: types.CallbackQuery):
     user_data = get_user(user_id)
     ids = get_roles_ids()
 
-    if not user_data or user_data["role"] != "friend":
-        await callback.answer("Кнопка предназначена только для друга!", show_alert=True)
-        return
-        
-    if user_data["last_workout_done"] == 1:
+    if user_data and user_data["last_workout_done"] == 1:
         await callback.answer("Ты уже отметился за сегодня!", show_alert=True)
         return
 
-    new_streak = user_data["streak_days"] + 1
+    streak = user_data["streak_days"] if user_data else 0
+    name = user_data["name"] if user_data else "Друг"
+    
+    new_streak = streak + 1
     update_user(user_id, "streak_days", new_streak)
     update_user(user_id, "last_workout_done", 1)
 
-    await callback.message.edit_text(f"🔥 Красава, {user_data['name']}! Тренировка засчитана. Серия: {new_streak} дн.")
-    if ids["trainer_id"]:
-        await bot.send_message(ids["trainer_id"], f"💪 {user_data['name']} потренировался! Серия: {new_streak} дней.")
+    await callback.message.edit_text(f"🔥 Красава, {name}! Тренировка засчитана. Серия: {new_streak} дн.")
+    if ids["trainer_id"] and ids["trainer_id"] != user_id:
+        await bot.send_message(ids["trainer_id"], f"💪 {name} потренировался! Серия: {new_streak} дней.")
     await callback.answer()
 
 
@@ -191,15 +188,13 @@ async def cmd_swap(message: types.Message, state: FSMContext):
     user_data = get_user(user_id)
 
     if user_data and user_data["role"] == "trainer":
-        # Полностью превращаем аккаунт в друга
         update_user(user_id, "role", "friend")
         update_user(user_id, "name", "Тест-Друг")
-        await message.answer("🔄 **Режим переключен:** Теперь бот видит твой аккаунт как **ДРУГА**. Напиши 'справка' для просмотра его функций.")
+        await message.answer("🔄 **Режим переключен:** Теперь ты **ДРУГ**. Напиши 'справка' для просмотра его функций.")
     else:
-        # Полностью превращаем аккаунт в тренера
         update_user(user_id, "role", "trainer")
         update_user(user_id, "name", "Тренер")
-        await message.answer("🔄 **Режим переключен:** Ты снова **ТРЕНЕР**. Тебе открыт секретный админ-отсек.")
+        await message.answer("🔄 **Режим переключен:** Ты снова **ТРЕНЕР**. Доступен секретный админ-отсек.")
 
 
 @dp.message(BotStates.WAITING_FOR_NAME)
@@ -213,10 +208,17 @@ async def process_name(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer("Секретный отсек тренера активирован! 😎\nНапиши слово **'справка'**, чтобы узнать свои текстовые команды.")
     else:
-        update_user(user_id, "role", "friend")
-        update_user(user_id, "name", user_input)
-        await message.answer(f"Принято, {user_input}! Теперь напиши час (0-23), в который тебе присылать напоминалку:")
-        await state.set_state(BotStates.WAITING_FOR_HOURS)
+        current_user = get_user(user_id)
+        if current_user and current_user["time_hours"] is not None:
+            update_user(user_id, "role", "friend")
+            update_user(user_id, "name", user_input)
+            await state.clear()
+            await message.answer(f"Ник успешно изменен на **{user_input}**! Твое время напоминаний осталось прежним.")
+        else:
+            update_user(user_id, "role", "friend")
+            update_user(user_id, "name", user_input)
+            await message.answer(f"Принято, {user_input}! Теперь напиши час (0-23), в который тебе присылать напоминалку:")
+            await state.set_state(BotStates.WAITING_FOR_HOURS)
 
 @dp.message(BotStates.WAITING_FOR_TRAINER_NAME)
 async def process_trainer_name(message: types.Message, state: FSMContext):
@@ -248,12 +250,23 @@ async def process_minutes(message: types.Message, state: FSMContext):
             await state.clear()
             
             user_data = get_user(user_id)
-            await message.answer(f"Всё сохранил! Время напоминаний: {user_data['time_hours']:02d}:{user_data['time_minutes']:02d}.\nНапиши слово **'справка'**, чтобы увидеть команды.")
+            await message.answer(
+                f"Всё сохранил! Время регулярных напоминаний: {user_data['time_hours']:02d}:{user_data['time_minutes']:02d}.\n"
+                f"⏳ **Отправляю тестовый план... Он придет через 3 секунды!**"
+            )
             
+            # Ставим регулярное напоминание в планировщик
             scheduler.add_job(
                 send_reminder, trigger="cron", 
                 hour=user_data["time_hours"], minute=user_data["time_minutes"], 
                 args=[user_id], id=f"reminder_{user_id}", replace_existing=True
+            )
+            
+            # Мгновенный тест через 3 секунды, чтобы сразу проверить кнопку
+            scheduler.add_job(
+                send_reminder, 
+                args=[user_id],
+                id=f"instant_{user_id}"
             )
         else:
             await message.answer("Введи минуты от 0 до 59.")
@@ -261,7 +274,7 @@ async def process_minutes(message: types.Message, state: FSMContext):
         await message.answer("Нужно ввести число!")
 
 
-# --- ОБРАБОТКА ТЕКСТОВЫХ ОТВЕТОВ ИЗ СОСТОЯНИЙ ---
+# --- ОБРАБОТКА ДЕЙСТВИЙ ИЗ СОСТОЯНИЙ ОЖИДАНИЯ ТЕКСТА ---
 @dp.message(BotStates.TRAINER_CHANGE_PLAN)
 async def trainer_confirm_plan(message: types.Message, state: FSMContext):
     update_workout_plan(message.text)
@@ -279,12 +292,13 @@ async def trainer_confirm_plan(message: types.Message, state: FSMContext):
 async def trainer_confirm_note(message: types.Message, state: FSMContext):
     user_data = get_user(message.from_user.id)
     ids = get_roles_ids()
+    name = user_data["name"] if user_data else "Тренер"
     
     if ids["friend_id"]:
-        await bot.send_message(ids["friend_id"], f"📩 **Заметка от тренера ({user_data['name']}):**\n\n{message.text}")
+        await bot.send_message(ids["friend_id"], f"📩 **Заметка от тренера ({name}):**\n\n{message.text}")
         await message.answer("Заметка мгновенно доставлена другу!")
     else:
-        await message.answer("Друг еще не зарегистрирован в боте.")
+        await message.answer("Друг еще не заходил в бота.")
     await state.clear()
 
 @dp.message(BotStates.FRIEND_SEND_MESSAGE_TO_TRAINER)
@@ -292,12 +306,13 @@ async def friend_confirm_to_trainer(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = get_user(user_id)
     ids = get_roles_ids()
+    name = user_data["name"] if user_data else "Друг"
     
     if ids["trainer_id"]:
-        await bot.send_message(ids["trainer_id"], f"✉️ **Сообщение от друга ({user_data['name']}):**\n\n{message.text}")
+        await bot.send_message(ids["trainer_id"], f"✉️ **Сообщение от друга ({name}):**\n\n{message.text}")
         await message.answer("Я передал твою заметку тренеру! 🫡")
     else:
-        await message.answer("Тренер еще не зашел в бота.")
+        await message.answer("Твой тренер еще не зашел в бота.")
     await state.clear()
 
 
@@ -309,7 +324,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
     text = message.text.lower()
 
     if not user_data:
-        await message.answer("Пожалуйста, введи команду /start для регистрации.")
+        await message.answer("Пожалуйста, введи команду /start")
         return
 
     # --- ЛОГИКА ДЛЯ ТРЕНЕРА ---
@@ -328,7 +343,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             await message.answer("📋 Шеф, слишком много команд в одном сообщении. Напиши что-то одно!")
             return
         if not found:
-            await message.answer("Я не понял команду, Шеф. Напиши слово **'справка'**, чтобы посмотреть список действий.")
+            await message.answer("Я не понял команду, Шеф. Напиши слово **'справка'**.")
             return
 
         cmd = found[0]
@@ -336,13 +351,12 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             await message.answer(
                 f"📋 **Пульт управления тренера ({user_data['name']}):**\n\n"
                 f"🔹 **'статистика'** — полный отчет по другу.\n"
-                f"🔹 **'план'** — изменить упражнения (улетят другу с уведомлением).\n"
+                f"🔹 **'план'** — изменить упражнения.\n"
                 f"🔹 **'заметка'** — переслать свой следующий текст другу.\n"
                 f"🔹 **'ник'** — изменить твое имя тренера в боте.\n"
                 f"ℹ️ *Переключить режим для теста: /swap*"
             )
         elif cmd == "status":
-            # Ищем, есть ли друг в базе
             conn = sqlite3.connect("bot_memory.db")
             cursor = conn.cursor()
             cursor.execute("SELECT name, time_hours, time_minutes, streak_days, missed_days, last_workout_done FROM users WHERE role='friend'")
@@ -389,10 +403,10 @@ async def main_text_parser(message: types.Message, state: FSMContext):
         found = [cmd for cmd, keywords in friend_triggers.items() if any(k in text for k in keywords)]
         
         if len(found) > 1:
-            await message.answer("🤖 Ого, сколько задач! Давай по одной. Напиши четко одно слово.")
+            await message.answer("🤖 Ого, сколько задач! Давай по одной. Напиши кусок из одного слова.")
             return
         if not found:
-            await message.answer("Я тебя не совсем понял. Напиши слово **'справка'**, чтобы глянуть, что я умею.")
+            await message.answer("Я тебя не совсем понял. Напиши слово **'справка'**.")
             return
 
         cmd = found[0]
@@ -424,7 +438,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             )
         elif cmd == "to_trainer":
             if not check_friend_limit(user_id):
-                await message.answer("⚠️ Ты исчерпал лимит заметок тренеру (максимум 5 сообщений в час). Отдохни немного!")
+                await message.answer("⚠️ Ты исчерпал лимит заметок тренеру (максимум 5 сообщений в час).")
                 return
             log_friend_message(user_id)
             await message.answer("Напиши сообщение для тренера в следующем ответе, я сразу перешлю:")
@@ -444,7 +458,6 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
     
-    # Восстановление таймеров для всех друзей в базе при перезапуске сервера Railway
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, time_hours, time_minutes FROM users WHERE role='friend'")
