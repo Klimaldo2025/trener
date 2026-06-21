@@ -10,12 +10,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+# Подключаем работу с таймзонами
+from pytz import timezone
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler()
+
+# Указываем единый часовой пояс Казахстана (UTC+5) для планировщика
+kz_timezone = timezone("Asia/Almaty")
+scheduler = AsyncIOScheduler(timezone=kz_timezone)
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -132,8 +137,6 @@ async def send_reminder(chat_id):
     user_data = get_user(chat_id)
     ids = get_roles_ids()
     plan = get_workout_plan()
-    
-    # Берем имя из базы, если юзера нет — ставим заглушку (для тестов)
     name = user_data["name"] if user_data else "Друг"
     
     if user_data:
@@ -250,23 +253,13 @@ async def process_minutes(message: types.Message, state: FSMContext):
             await state.clear()
             
             user_data = get_user(user_id)
-            await message.answer(
-                f"Всё сохранил! Время регулярных напоминаний: {user_data['time_hours']:02d}:{user_data['time_minutes']:02d}.\n"
-                f"⏳ **Отправляю тестовый план... Он придет через 3 секунды!**"
-            )
+            await message.answer(f"Всё сохранил! Время напоминаний по времени Казахстана: {user_data['time_hours']:02d}:{user_data['time_minutes']:02d}.\nНапиши слово **'справка'**, чтобы увидеть команды.")
             
-            # Ставим регулярное напоминание в планировщик
+            # Задача создается с учетом переданной в scheduler таймзоны UTC+5
             scheduler.add_job(
                 send_reminder, trigger="cron", 
                 hour=user_data["time_hours"], minute=user_data["time_minutes"], 
                 args=[user_id], id=f"reminder_{user_id}", replace_existing=True
-            )
-            
-            # Мгновенный тест через 3 секунды, чтобы сразу проверить кнопку
-            scheduler.add_job(
-                send_reminder, 
-                args=[user_id],
-                id=f"instant_{user_id}"
             )
         else:
             await message.answer("Введи минуты от 0 до 59.")
@@ -279,13 +272,9 @@ async def process_minutes(message: types.Message, state: FSMContext):
 async def trainer_confirm_plan(message: types.Message, state: FSMContext):
     update_workout_plan(message.text)
     await message.answer("Новый план успешно сохранен!")
-    
     ids = get_roles_ids()
     if ids["friend_id"]:
-        await bot.send_message(
-            ids["friend_id"], 
-            f"🔔 **Тренер изменил план тренировок!**\n\n**Новый план:**\n{message.text}"
-        )
+        await bot.send_message(ids["friend_id"], f"🔔 **Тренер изменил план тренировок!**\n\n**Новый план:**\n{message.text}")
     await state.clear()
 
 @dp.message(BotStates.TRAINER_SEND_NOTE)
@@ -293,7 +282,6 @@ async def trainer_confirm_note(message: types.Message, state: FSMContext):
     user_data = get_user(message.from_user.id)
     ids = get_roles_ids()
     name = user_data["name"] if user_data else "Тренер"
-    
     if ids["friend_id"]:
         await bot.send_message(ids["friend_id"], f"📩 **Заметка от тренера ({name}):**\n\n{message.text}")
         await message.answer("Заметка мгновенно доставлена другу!")
@@ -307,7 +295,6 @@ async def friend_confirm_to_trainer(message: types.Message, state: FSMContext):
     user_data = get_user(user_id)
     ids = get_roles_ids()
     name = user_data["name"] if user_data else "Друг"
-    
     if ids["trainer_id"]:
         await bot.send_message(ids["trainer_id"], f"✉️ **Сообщение от друга ({name}):**\n\n{message.text}")
         await message.answer("Я передал твою заметку тренеру! 🫡")
@@ -336,9 +323,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             "note": ["заметка", "сообщен", "написать"],
             "change_name": ["ник", "имя", "назвать"]
         }
-
         found = [cmd for cmd, keywords in trainer_triggers.items() if any(k in text for k in keywords)]
-        
         if len(found) > 1:
             await message.answer("📋 Шеф, слишком много команд в одном сообщении. Напиши что-то одно!")
             return
@@ -362,7 +347,6 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             cursor.execute("SELECT name, time_hours, time_minutes, streak_days, missed_days, last_workout_done FROM users WHERE role='friend'")
             f_row = cursor.fetchone()
             conn.close()
-            
             if f_row:
                 time_str = f"{f_row[1]:02d}:{f_row[2]:02d}" if f_row[1] is not None else "Не настроено"
                 status_today = "Выполнил! ✅" if f_row[5] == 1 else "Еще филонит ❌"
@@ -399,9 +383,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
             "progress": ["прогресс", "статистика", "дни", "пропуск"],
             "motivation": ["мотивация", "поддержи", "пинок"]
         }
-
         found = [cmd for cmd, keywords in friend_triggers.items() if any(k in text for k in keywords)]
-        
         if len(found) > 1:
             await message.answer("🤖 Ого, сколько задач! Давай по одной. Напиши кусок из одного слова.")
             return
@@ -416,7 +398,7 @@ async def main_text_parser(message: types.Message, state: FSMContext):
                 f"🔹 **'план'** — посмотреть свои текущие упражнения.\n"
                 f"🔹 **'ник'** — поменять имя в боте.\n"
                 f"🔹 **'время'** — настроить часы для напоминаний.\n"
-                f"🔹 **'прогресс'** — твоя серия дней и пропуски.\n"
+                f"🔹 **'progres'** или **'прогресс'** — твоя серия дней и пропуски.\n"
                 f"🔹 **'тренер'** — отправить сообщение тренеру.\n"
                 f"🔹 **'мотивация'** — получить пинок к действию!"
             )
@@ -464,6 +446,7 @@ async def main():
     rows = cursor.fetchall()
     conn.close()
     
+    # Пересоздаем существующие задачи из базы с правильной таймзоной при перезапуске
     for row in rows:
         if row[1] is not None and row[2] is not None:
             scheduler.add_job(
